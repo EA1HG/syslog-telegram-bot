@@ -4,10 +4,10 @@ import requests
 import datetime
 
 # Configuración
-UDP_IP = "192.168.1.43"
+UDP_IP = "TU IP"
 UDP_PORT = 514
-TELEGRAM_BOT_TOKEN = "7628504082:AAG7y6bZgtWzINXBte1vEF5GPUGo35pDN8g"
-TELEGRAM_CHAT_ID = "67114489"
+TELEGRAM_BOT_TOKEN = "TU TOKEN "
+TELEGRAM_CHAT_ID = "CHATID"
 FILTER_PATTERN = r""       # patrón deseado
 FILTER_CALL = r""          # filtro adicional dentro del patrón
 LOG_FILE = "syslog.log"
