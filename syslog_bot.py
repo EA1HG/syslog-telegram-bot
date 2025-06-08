@@ -8,8 +8,8 @@ from flask import Flask, jsonify, render_template_string
 # Configuración UDP y Telegram
 UDP_IP = "192.168.1.47"
 UDP_PORT = 514
-TELEGRAM_BOT_TOKEN = "7628504082:AAG7y6bZgtWzINXBte1vEF5GPUGo35pDN8g"
-TELEGRAM_CHAT_ID = "-1002149472286"
+TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
 FILTER_PATTERN = r""       # patrón deseado (ajusta aquí)
 FILTER_CALL = r""          # filtro adicional dentro del patrón (ajusta aquí)
 LOG_FILE = "syslog.log"
