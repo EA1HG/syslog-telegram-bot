@@ -2,26 +2,31 @@ import socket
 import re
 import requests
 import datetime
+import threading
+from flask import Flask, jsonify, render_template_string
 
-# Configuración
-UDP_IP = "TU IP"
+# Configuración UDP y Telegram
+UDP_IP = "192.168.1.47"
 UDP_PORT = 514
-TELEGRAM_BOT_TOKEN = "TU TOKEN "
-TELEGRAM_CHAT_ID = "CHATID"
-FILTER_PATTERN = r""       # patrón deseado
-FILTER_CALL = r""          # filtro adicional dentro del patrón
+TELEGRAM_BOT_TOKEN = "7628504082:AAG7y6bZgtWzINXBte1vEF5GPUGo35pDN8g"
+TELEGRAM_CHAT_ID = "-1002149472286"
+FILTER_PATTERN = r""       # patrón deseado (ajusta aquí)
+FILTER_CALL = r""          # filtro adicional dentro del patrón (ajusta aquí)
 LOG_FILE = "syslog.log"
 LOG_ENABLED = True
 LOG_ONLY_FILTERED = True
 
+messages_data = []
+
+app = Flask(__name__)
+
 def log_message(message):
     if LOG_ENABLED:
         timestamp = datetime.datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        with open(LOG_FILE, "a") as log_file:
+        with open(LOG_FILE, "a", encoding="utf-8") as log_file:
             log_file.write(f"[{timestamp}] {message}\n")
 
 def escape_markdown(text):
-    # Escapa caracteres especiales para Telegram MarkdownV2
     escape_chars = r"_*[]()~`>#+-=|{}.!"
     for ch in escape_chars:
         text = text.replace(ch, "\\" + ch)
@@ -38,9 +43,6 @@ def extract_message_after_pattern(message):
     return None
 
 def extract_emisor_receptor(raw_message):
-    """
-    Extrae callsign emisor y receptor/igate/digi del mensaje real.
-    """
     m = re.search(r"(RX|TX) / ([^/]+) / ([^/]+) / ([^/]+)", raw_message)
     if m:
         emisor = m.group(3).strip()
@@ -65,6 +67,19 @@ def extract_emisor_receptor(raw_message):
 
     return None, None
 
+def extract_coordinates(message):
+    lat_match = re.search(r"(\d{1,2}\.\d+)([NS])", message)
+    lon_match = re.search(r"(-?\d{1,3}\.\d+)([EW])", message)
+    if lat_match and lon_match:
+        lat = float(lat_match.group(1))
+        if lat_match.group(2) == 'S':
+            lat = -lat
+        lon = float(lon_match.group(1))
+        if lon_match.group(2) == 'W':
+            lon = -lon
+        return lat, lon
+    return None, None
+
 def add_value_based_icons(message, timestamp=None, emisor=None, receptor=None):
     alerts = []
     lines = []
@@ -76,18 +91,15 @@ def add_value_based_icons(message, timestamp=None, emisor=None, receptor=None):
     if receptor:
         lines.append(f"📟 *Receptor: {receptor}*")
 
-    # TX / RX
     if "TX" in message:
         lines.append("📤 *TX*")
     elif "RX" in message:
         lines.append("📥 *RX*")
 
-    # ack
     ack_match = re.search(r"(ack\d*)", message, flags=re.IGNORECASE)
     if ack_match:
         lines.append(f"✅ *{ack_match.group(1)}*")
 
-    # dBm
     dbm_match = re.search(r"(-\d{2,3})dBm", message)
     if dbm_match:
         dbm = int(dbm_match.group(1))
@@ -101,7 +113,6 @@ def add_value_based_icons(message, timestamp=None, emisor=None, receptor=None):
                 alerts.append("Señal débil")
         lines.append(f"{icon} *{dbm}dBm*")
 
-    # dB
     db_match = re.search(r"(-\d+\.\d{1,2})dB", message)
     if db_match:
         db_value = float(db_match.group(1))
@@ -110,7 +121,6 @@ def add_value_based_icons(message, timestamp=None, emisor=None, receptor=None):
             alerts.append("Ruido alto")
         lines.append(f"{icon} *{db_value}dB*")
 
-    # Hz
     hz_match = re.search(r"([-+]?\d{1,5})Hz", message)
     if hz_match:
         hz = abs(int(hz_match.group(1)))
@@ -119,11 +129,9 @@ def add_value_based_icons(message, timestamp=None, emisor=None, receptor=None):
             alerts.append("Desviación alta de frecuencia")
         lines.append(f"{icon} *{hz}Hz*")
 
-    # PARM
     if "PARM" in message:
         lines.append("📊 *PARM*")
 
-    # Voltajes
     voltages = re.findall(r"V_Batt=(\d+\.\d+),?V_Ext=(\d+\.\d+)?", message)
     if voltages:
         for v_batt_str, v_ext_str in voltages:
@@ -147,13 +155,30 @@ def add_value_based_icons(message, timestamp=None, emisor=None, receptor=None):
             lines.append(f"{batt_icon} *V_Batt={v_batt_str}V*")
             lines.append(f"{ext_icon} *V_Ext={v_ext_str}V*")
 
-    if alerts:
-        alert_line = "🔔 *ALERTA: " + ", ".join(alerts) + "*"
-        lines.insert(2, alert_line)  # Después del timestamp y emisor
+    batt_match = re.search(r"Batt=(\d+\.\d+)V", message)
+    if batt_match:
+        batt_value = batt_match.group(1)
+        batt_float = float(batt_value)
+        if batt_float >= 4.0:
+            batt_icon = "🔋"
+        else:
+            batt_icon = "🪫"
+            alerts.append("Batería baja")
+        lines.append(f"{batt_icon} *Batt={batt_value}V*")
+
+    low_voltage_match = re.search(r"LowVoltagePowerOff\s*=\s*([01])", message)
+    if low_voltage_match:
+        lvp_value = low_voltage_match.group(1)
+        estado = "🔴 ACTIVADO" if lvp_value == "1" else "🟢 DESACTIVADO"
+        lines.append(f"⚠️ *LowVoltagePowerOff: {estado}*")
+
+   # if alerts:
+     #   alert_line = "🔔 *ALERTA: " + ", ".join(alerts) + "*"
+      #  lines.insert(2, alert_line)
 
     return "\n".join(lines)
 
-def main():
+def udp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_IP, UDP_PORT))
     print(f"Escuchando en UDP {UDP_PORT} para mensajes syslog...")
@@ -170,25 +195,135 @@ def main():
         filtered_message = extract_message_after_pattern(raw_message)
         if filtered_message:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
             emisor, receptor = extract_emisor_receptor(raw_message)
-
             decorated_message = add_value_based_icons(filtered_message, timestamp=timestamp, emisor=emisor, receptor=receptor)
             safe_message = escape_markdown(decorated_message)
 
+            lat, lon = extract_coordinates(raw_message)
+
+            if lat is not None and lon is not None and emisor is not None:
+                entry = {
+                    "timestamp": timestamp,
+                    "emisor": emisor,
+                    "receptor": receptor,
+                    "lat": lat,
+                    "lon": lon,
+                    "message": safe_message
+                }
+                messages_data.append(entry)
+                if len(messages_data) > 1000:
+                    messages_data.pop(0)
+
+            # Enviar Telegram
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = {
+            data_telegram = {
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": safe_message,
-                "parse_mode": "MarkdownV2",
-                "disable_notification": False
+                "parse_mode": "MarkdownV2"
             }
             try:
-                response = requests.post(url, data=data)
-                if response.status_code != 200:
-                    print(f"Error Telegram: {response.text}")
+                requests.post(url, data=data_telegram, timeout=5)
             except Exception as e:
-                print(f"Error enviando a Telegram: {e}")
+                print(f"Error al enviar mensaje Telegram: {e}")
+
+@app.route('/')
+def index():
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Mapa de emisores/receptores UDP</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+      #map { height: 100vh; }
+      .callsign-label {
+          font-weight: bold;
+          color: darkblue;
+          background-color: white;
+          padding: 2px 4px;
+          border-radius: 3px;
+          border: 1px solid navy;
+      }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <script>
+      var map = L.map('map').setView([40.960, -5.663], 7);
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 18,
+          attribution: '© OpenStreetMap'
+      }).addTo(map);
+
+      function haversine(lat1, lon1, lat2, lon2) {
+          function toRad(x) { return x * Math.PI / 180; }
+          var R = 6371;
+          var dLat = toRad(lat2 - lat1);
+          var dLon = toRad(lon2 - lon1);
+          var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+          var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+          return R * c;
+      }
+
+      async function loadMarkers() {
+          const response = await fetch("/data");
+          const data = await response.json();
+
+          if (window.markersLayer) {
+              window.markersLayer.clearLayers();
+          } else {
+              window.markersLayer = L.layerGroup().addTo(map);
+          }
+
+          const ea1hg = data.find(d => d.emisor.toUpperCase() === "EA1HG-10");
+          const ea1hgLat = ea1hg ? ea1hg.lat : null;
+          const ea1hgLon = ea1hg ? ea1hg.lon : null;
+
+          data.forEach(item => {
+              let distText = "Distancia a EA1HG-10: N/D";
+              if (ea1hgLat !== null && ea1hgLon !== null) {
+                  let distKm = haversine(item.lat, item.lon, ea1hgLat, ea1hgLon);
+                  distText = `Distancia a EA1HG-10: ${distKm.toFixed(2)} km`;
+              }
+
+              let marker = L.marker([item.lat, item.lon]);
+
+              marker.bindTooltip(item.emisor, {permanent: true, direction: 'right', offset: [10, 0], className: 'callsign-label'});
+
+              marker.bindPopup(
+                  `<b>Emisor:</b> ${item.emisor}<br>` +
+                  `<b>Receptor:</b> ${item.receptor || 'N/A'}<br>` +
+                  `<b>Hora:</b> ${item.timestamp}<br>` +
+                  `<pre>${item.message}</pre>` +
+                  `<b>${distText}</b>`
+              );
+
+              window.markersLayer.addLayer(marker);
+          });
+      }
+
+      loadMarkers();
+      setInterval(loadMarkers, 15000);
+    </script>
+</body>
+</html>
+    """)
+
+@app.route('/data')
+def data():
+    return jsonify(messages_data)
 
 if __name__ == "__main__":
-    main()
+    threading.Thread(target=udp_listener, daemon=True).start()
+    app.run(host="0.0.0.0", port=5000)
